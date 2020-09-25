@@ -96,13 +96,13 @@ func Read(reader io.Reader) (*PNG, error) {
 		}
 
 		if readingHeader {
-			if byteRead == 0x1A || byteRead == 0x0A {
+			if byteRead == 0x0A {
 				lfDetection++
 			}
 
 			header = append(header, byteRead)
 
-			if lfDetection > 2 {
+			if lfDetection >= 2 {
 				readingHeader = false
 			}
 		} else {
