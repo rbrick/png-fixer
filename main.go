@@ -3,10 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/hex"
+	"encoding/binary"
 	"errors"
 	"flag"
-	"fmt"
 	"hash/crc32"
 	"io"
 	"io/ioutil"
@@ -31,25 +30,26 @@ var (
 
 //Chunk represents a chunk within the PNG file
 type Chunk struct {
-	Length int
+	Length int32
 	Type   string
 	Data   []byte
 	CRC    uint32
 }
 
 //Verify attempts to verify the chunk with the CRC & Length of the file
-func (c *Chunk) Verify() error {
+func (c *Chunk) Verify() (uint32, error) {
 
-	if c.Length != len(c.Data) {
+	if int(c.Length) != len(c.Data) {
 		// woop. missing bytes
-		return ErrorMissingBytes
+		return 0, ErrorMissingBytes
 	}
 
-	if crc32.ChecksumIEEE(c.Data) != c.CRC {
-		return ErrorCRCMismatch
+	dataCrc := crc32.ChecksumIEEE(c.Data)
+	if dataCrc != c.CRC {
+		return dataCrc, ErrorCRCMismatch
 	}
 
-	return nil
+	return 0, nil
 }
 
 type Header struct {
@@ -72,30 +72,30 @@ func (h *Header) Verify() error {
 		return ErrorUnixToDOSConversion
 	}
 
-
 	return nil
 }
 
 //PNG represents the PNG file structure
 type PNG struct {
 	FileHeader *Header
-	Chunks     map[string]*Chunk
+	Chunks     map[string][]*Chunk
 }
 
 func Read(reader io.Reader) (*PNG, error) {
 	buf := bufio.NewReader(reader)
 	var header []byte
+	var chunks = map[string][]*Chunk{}
 
 	readingHeader := true
 	lfDetection := 0
 
 	for {
-		byteRead, err := buf.ReadByte()
-		if err != nil {
-			return nil, err
-		}
-
 		if readingHeader {
+			byteRead, err := buf.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+
 			if byteRead == 0x0A {
 				lfDetection++
 			}
@@ -106,13 +106,64 @@ func Read(reader io.Reader) (*PNG, error) {
 				readingHeader = false
 			}
 		} else {
-			break
-		}
 
+			localBuf := make([]byte, 4)
+			var dataLength int32
+			var chunkType string
+			var crc uint32
+
+			err := binary.Read(buf, binary.BigEndian, &dataLength)
+
+			if err == io.EOF {
+				break
+			}
+
+			if err != nil {
+				return nil, err
+			}
+
+			_, err = buf.Read(localBuf)
+
+			if err != nil {
+				return nil, err
+			}
+
+			chunkType = string(localBuf)
+
+			chunkData := make([]byte, dataLength)
+
+			_, err = buf.Read(chunkData)
+
+			if err != nil {
+				return nil, err
+			}
+
+			err = binary.Read(buf, binary.BigEndian, &crc)
+
+			if err != nil {
+				return nil, err
+			}
+
+			chunk := &Chunk{
+				Length: dataLength,
+				Type:   chunkType,
+				Data:   chunkData,
+				CRC:    crc,
+			}
+
+			if _, ok := chunks[chunkType]; !ok {
+				chunks[chunkType] = make([]*Chunk, 0)
+			}
+
+			v := chunks[chunkType]
+			v = append(v, chunk)
+			chunks[chunkType] = v
+		}
 	}
 
 	return &PNG{
 		FileHeader: &Header{header},
+		Chunks:     chunks,
 	}, nil
 }
 
@@ -135,6 +186,18 @@ func main() {
 		log.Println(verifyError.Error())
 	}
 
-	fmt.Printf("length: %d, header: %s",  len(pngFile.FileHeader.HeaderBytes), hex.Dump(pngFile.FileHeader.HeaderBytes))
+	for _, v := range pngFile.Chunks {
+		for _, chunk := range v {
+			if chunk.Type == "IEND" {
+				break
+			}
+			crc, verifiedError := chunk.Verify()
 
+			if verifiedError == nil {
+				log.Printf("Chunk %s is OK!\n", chunk.Type)
+			} else {
+				log.Printf("Chunk %s has an error! Chunk CRC: %x, Data CRC: %x Error %s\n", chunk.Type, chunk.CRC, crc, verifiedError.Error())
+			}
+		}
+	}
 }
